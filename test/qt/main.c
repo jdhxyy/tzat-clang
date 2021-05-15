@@ -107,6 +107,7 @@ static int case2(void) {
     for (int i = 0; i < total; i++) {
         printf("%d:%s\n", i, TZATRespGetLine(respHandle, i));
     }
+    printf("get line:%s\n", TZATRespGetLineByKeyword(respHandle, "abc"));
     TZATDeleteResp(respHandle);
 
     PT_END(&pt);

@@ -67,6 +67,10 @@ int TZATRespGetLineTotal(intptr_t respHandle);
 // 如果指定行不存在,则返回的是NULL
 const char* TZATRespGetLine(intptr_t respHandle, int lineNumber);
 
+// TZATRespGetLineByKeyword 读取关键字所在行
+// 如果行不存在,则返回的是NULL
+const char* TZATRespGetLineByKeyword(intptr_t respHandle, const char* keyword);
+
 // TZATRegisterUrc 注册URC回调函数
 // prefix是前缀,suffix是后缀
 // bufSize是正文数据最大字节数,正文不包括前缀和后缀

@@ -431,6 +431,34 @@ const char* TZATRespGetLine(intptr_t respHandle, int lineNumber) {
     return resp->buf + offset;
 }
 
+// TZATRespGetLineByKeyword 读取关键字所在行
+// 如果行不存在,则返回的是NULL
+const char* TZATRespGetLineByKeyword(intptr_t respHandle, const char* keyword) {
+    if (respHandle == 0) {
+        return NULL;
+    }
+
+    tResp* resp = (tResp*)respHandle;
+    if (resp->isWaitEnd == false) {
+        return NULL;
+    }
+
+    int offset = 0;
+    int len = 0;
+    for (int i = 0; i < resp->recvLineCounts; i++) {
+        len = (int)strlen(resp->buf + offset);
+        if (len == 0) {
+            return NULL;
+        }
+        if (strstr(resp->buf + offset, keyword) != NULL) {
+            return resp->buf + offset;
+        }
+
+        offset += len + 1;
+    }
+    return NULL;
+}
+
 // TZATRegisterUrc 注册URC回调函数
 // prefix是前缀,suffix是后缀
 // bufSize是正文数据最大字节数,正文不包括前缀和后缀
