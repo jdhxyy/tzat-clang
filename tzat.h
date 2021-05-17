@@ -84,4 +84,7 @@ bool TZATSetWaitDataCallback(int size, int timeout, TZTADataFunc callback);
 // TZATSetEndSign 设置结束符.如果不需要额外设置则可设置为'\0'
 void TZATSetEndSign(char ch);
 
+// TZATSendData 发送数据
+void TZATSendData(uint8_t* data, int size);
+
 #endif

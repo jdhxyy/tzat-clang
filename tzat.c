@@ -574,3 +574,8 @@ bool TZATSetWaitDataCallback(int size, int timeout, TZTADataFunc callback) {
 void TZATSetEndSign(char ch) {
     endSign = ch;
 }
+
+// TZATSendData ·¢ËÍÊý¾Ý
+void TZATSendData(uint8_t* data, int size) {
+    sendFunc(data, size);
+}
