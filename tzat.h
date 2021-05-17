@@ -81,4 +81,7 @@ bool TZATRegisterUrc(char* prefix, char* suffix, int bufSize, TZDataFunc callbac
 // size是接收数据字节数.timeout是超时时间,单位:ms
 bool TZATSetWaitDataCallback(int size, int timeout, TZTADataFunc callback);
 
+// TZATSetEndSign 设置结束符.如果不需要额外设置则可设置为'\0'
+void TZATSetEndSign(char ch);
+
 #endif

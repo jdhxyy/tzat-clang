@@ -97,6 +97,9 @@ static tResp waitResp;
 // 等待指定长度数据
 static tReceive waitData;
 
+// 用户设置的结束符
+static char endSign = '\0';
+
 static int checkFifo(void);
 static void dealWaitResp(uint8_t byte);
 static void dealUrcList(uint8_t byte);
@@ -162,7 +165,7 @@ static int checkFifo(void) {
 }
 
 static void dealWaitResp(uint8_t byte) {
-    // 接收标志.0:普通.1:换行.2:OK.3:ERROR
+    // 接收标志.0:普通.1:换行.2:OK.3:ERROR.4:用户结束符
     int flag = 0;
     if (byte == '\n' && waitResp.bufLen >= 1 && waitResp.buf[waitResp.bufLen - 1] == '\r') {
         flag = 1;
@@ -170,11 +173,16 @@ static void dealWaitResp(uint8_t byte) {
         flag = 2;
     } else if (byte == 'R' && waitResp.bufLen >= 4 && memcmp(waitResp.buf + waitResp.bufLen - 4, "ERRO", 4) == 0) {
         flag = 3;
+    } else if (endSign != '\0' && byte == endSign) {
+        flag = 4;
     }
 
     if (waitResp.setLineNum == 0) {
         // 判断OK和ERROR
-        if (flag == 2 || flag == 3) {
+        if (flag == 2 || flag == 3 || flag == 4) {
+            waitResp.recvLineCounts++;
+            waitResp.buf[waitResp.bufLen++] = '\0';
+            
             waitResp.result = TZAT_RESP_RESULT_OK;
             waitResp.isWaitEnd = true;
             return;
@@ -198,7 +206,8 @@ static void dealWaitResp(uint8_t byte) {
 
     // 普通数据
     waitResp.buf[waitResp.bufLen++] = (char)byte;
-    if (waitResp.bufLen >= waitResp.bufSize) {
+    // 考虑到结束符所以得多留一个字节空间
+    if (waitResp.bufLen >= waitResp.bufSize - 1) {
         waitResp.result = TZAT_RESP_RESULT_LACK_OF_MEMORY;
         waitResp.isWaitEnd = true;
     }
@@ -312,6 +321,10 @@ intptr_t TZATCreateResp(int bufSize, int setLineNum, int timeout) {
         TZFree(resp);
         return 0;
     }
+    // 最后会加'\0'
+    if (bufSize < 2) {
+        bufSize = 2;
+    }
     resp->bufSize = bufSize;
     resp->setLineNum = setLineNum;
     resp->timeout = (uint64_t)timeout * 1000;
@@ -405,34 +418,26 @@ int TZATRespGetLineTotal(intptr_t respHandle) {
 
 // TZATRespGetLine 读取指定行
 // lineNumber是行号.行号从0开始
-// 如果指定行不存在,则返回的是NULL
+// 如果指定行不存在,则返回的是NULL.注意可能有空行
 const char* TZATRespGetLine(intptr_t respHandle, int lineNumber) {
     if (respHandle == 0) {
         return NULL;
     }
 
     tResp* resp = (tResp*)respHandle;
-    if (resp->isWaitEnd == false) {
+    if (resp->isWaitEnd == false || lineNumber >= resp->recvLineCounts) {
         return NULL;
     }
 
     int offset = 0;
-    int len = 0;
     for (int i = 0; i < lineNumber; i++) {
-        len = (int)strlen(resp->buf + offset);
-        if (len == 0) {
-            return NULL;
-        }
-        offset += len + 1;
-    }
-    if (strlen(resp->buf + offset) == 0) {
-        return NULL;
+        offset += (int)strlen(resp->buf + offset) + 1;
     }
     return resp->buf + offset;
 }
 
 // TZATRespGetLineByKeyword 读取关键字所在行
-// 如果行不存在,则返回的是NULL
+// 如果行不存在,则返回的是NULL.注意可能有空行
 const char* TZATRespGetLineByKeyword(intptr_t respHandle, const char* keyword) {
     if (respHandle == 0) {
         return NULL;
@@ -448,7 +453,7 @@ const char* TZATRespGetLineByKeyword(intptr_t respHandle, const char* keyword) {
     for (int i = 0; i < resp->recvLineCounts; i++) {
         len = (int)strlen(resp->buf + offset);
         if (len == 0) {
-            return NULL;
+            continue;
         }
         if (strstr(resp->buf + offset, keyword) != NULL) {
             return resp->buf + offset;
@@ -563,4 +568,9 @@ bool TZATSetWaitDataCallback(int size, int timeout, TZTADataFunc callback) {
     waitData.timeout = (uint64_t)timeout * 1000;
     waitData.callback = callback;
     return true;
+}
+
+// TZATSetEndSign 设置结束符.如果不需要额外设置则可设置为'\0'
+void TZATSetEndSign(char ch) {
+    endSign = ch;
 }
