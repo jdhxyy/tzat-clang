@@ -13,6 +13,7 @@
 #define RAM_INTERNAL 0
 
 static int gMid = -1;
+static intptr_t handle = 0;
 
 static void print(uint8_t* bytes, int size);
 static LaganTime getLaganTime(void);
@@ -36,7 +37,7 @@ int main() {
     TZMallocLoad(RAM_INTERNAL, 20, 100 * 1024, malloc(100 * 1024));
     gMid = TZMallocRegister(RAM_INTERNAL, "test", 4096);
 
-    TZATLoad(tzatSend, tzatIsAllowSend);
+    handle = TZATCreate(tzatSend, tzatIsAllowSend);
 
     AsyncStart(case1, ASYNC_ONLY_ONE_TIME);
     AsyncStart(case2, ASYNC_ONLY_ONE_TIME);
@@ -88,7 +89,7 @@ static int case1(void) {
 
     PT_BEGIN(&pt);
 
-    PT_WAIT_UNTIL(&pt, TZATExecCmd(0, "AT+CIPSEND=3,\"%s\",%d\r\n", "192.168.1.2", 1234));
+    PT_WAIT_UNTIL(&pt, TZATExecCmd(handle, 0, "AT+CIPSEND=3,\"%s\",%d\r\n", "192.168.1.2", 1234));
 
     PT_END(&pt);
 }
@@ -100,7 +101,7 @@ static int case2(void) {
     PT_BEGIN(&pt);
 
     respHandle = TZATCreateResp(100, 3, 5000);
-    PT_WAIT_UNTIL(&pt, TZATExecCmd(respHandle, "AT+UART_DEF=%d,%d,%d,%d,%d\r\n", 115200, 8, 1, 0, 0));
+    PT_WAIT_UNTIL(&pt, TZATExecCmd(handle, respHandle, "AT+UART_DEF=%d,%d,%d,%d,%d\r\n", 115200, 8, 1, 0, 0));
     printf("result:%d\n", TZATRespGetResult(respHandle));
 
     int total = TZATRespGetLineTotal(respHandle);
@@ -119,10 +120,10 @@ static int receiveTask(void) {
 
     PT_BEGIN(&pt);
 
-    TZATReceive((uint8_t*)"hellojdh\r\n", strlen("hellojdh\r\n"));
-    TZATReceive((uint8_t*)"abcdefg\r\n", strlen("abcdefg\r\n"));
-    TZATReceive((uint8_t*)"hijklmn\r\n", strlen("hijklmn\r\n"));
-    TZATReceive((uint8_t*)"+IPD,5,\"192.168.1.119\",12100:ABCDE", strlen("+IPD,7,\"192.168.1.119\",12100:ABCDE"));
+    TZATReceive(handle, (uint8_t*)"hellojdh\r\n", strlen("hellojdh\r\n"));
+    TZATReceive(handle, (uint8_t*)"abcdefg\r\n", strlen("abcdefg\r\n"));
+    TZATReceive(handle, (uint8_t*)"hijklmn\r\n", strlen("hijklmn\r\n"));
+    TZATReceive(handle, (uint8_t*)"+IPD,5,\"192.168.1.119\",12100:ABCDE", strlen("+IPD,7,\"192.168.1.119\",12100:ABCDE"));
 
     num++;
     printf("\nsend num:%d\n", num);
@@ -135,7 +136,7 @@ static int case3(void) {
 
     PT_BEGIN(&pt);
 
-    TZATRegisterUrc("+IPD,", ":", 100, receiveCallback);
+    TZATRegisterUrc(handle, "+IPD,", ":", 100, receiveCallback);
 
     PT_END(&pt);
 }
@@ -147,10 +148,10 @@ static void receiveCallback(uint8_t* bytes, int size) {
     }
     printf("\n");
 
-    if (TZATIsBusy()) {
+    if (TZATIsBusy(handle)) {
         printf("--------------------->busy!\n");
     }
-    TZATSetWaitDataCallback(5, 100, receiveDataCallback);
+    TZATSetWaitDataCallback(handle, 5, 100, receiveDataCallback);
 }
 
 static void receiveDataCallback(TZATRespResult result, uint8_t* bytes, int size) {

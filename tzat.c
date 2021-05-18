@@ -83,138 +83,201 @@ typedef struct {
     TZTADataFunc callback;
 } tReceive;
 
+// AT组件对象
+typedef struct {
+    TZDataFunc send;
+    TZIsAllowSendFunc isAllowSend;
+
+    intptr_t fifo;
+    intptr_t urcList;
+
+    // 等待响应数据
+    tResp waitResp;
+    // 等待指定长度数据
+    tReceive waitData;
+
+    // 用户设置的结束符
+    char endSign;
+} tObjItem;
+
 #pragma pack(0)
 
 static int mid = -1;
-static TZDataFunc sendFunc = NULL;
-static TZIsAllowSendFunc isAllowSendFunc = NULL;
-
-static intptr_t fifo = 0;
-static intptr_t urcList = 0;
-
-// 等待响应数据
-static tResp waitResp;
-// 等待指定长度数据
-static tReceive waitData;
-
-// 用户设置的结束符
-static char endSign = '\0';
+static intptr_t objList = 0;
 
 static int checkFifo(void);
-static void dealWaitResp(uint8_t byte);
-static void dealUrcList(uint8_t byte);
+static void checkObjFifo(tObjItem* obj);
+static void dealWaitResp(tObjItem* obj, uint8_t byte);
+static void dealUrcList(tObjItem* obj, uint8_t byte);
 static void dealUrcItem(uint8_t byte, tUrcItem* item);
-static void dealWaitData(uint8_t byte);
-static TZListNode* createNode(void);
-
+static void dealWaitData(tObjItem* obj, uint8_t byte);
 static int checkTimeout(void);
+static void checkObjTimeout(tObjItem* obj, uint64_t now);
+static TZListNode* createNode(intptr_t list, int itemSize);
 
-// TZATLoad 模块载入
-void TZATLoad(TZDataFunc send, TZIsAllowSendFunc isAllowSend) {
-    waitResp.isWaitEnd = true;
-    waitData.isWaitEnd = true;
-
+// TZATSetMid 设置内存id
+// 如果不调用本函数.则模块使用默认内存ID
+// 必须在调用TZATCreate函数前调用本函数,否则模块使用默认内存ID
+void TZATSetMid(int id) {
     if (mid == -1) {
-        mid = TZMallocRegister(0, TZAT_TAG, TZAT_MALLOC_SIZE);
+        mid = id;
+    }
+}
+
+// TZATCreate 创建AT组件
+// send是本组件发送函数.isAllowSend是是否允许发送函数
+// 创建成功返回句柄.失败返回0
+intptr_t TZATCreate(TZDataFunc send, TZIsAllowSendFunc isAllowSend) {
+    static bool isFirst = true;
+
+    if (isFirst) {
+        isFirst = false;
+
         if (mid == -1) {
-            LE(TZAT_TAG, "malloc register failed!");
-            return;
+            mid = TZMallocRegister(0, TZAT_TAG, TZAT_MALLOC_SIZE);
+            if (mid == -1) {
+                LE(TZAT_TAG, "create object failed!malloc register failed!");
+                return 0;
+            }
         }
-    }
-    fifo = TZFifoCreate(mid, TZAT_FIFO_SIZE, 1);
-    if (fifo == 0) {
-        LE(TZAT_TAG, "create fifo failed!");
-        return;
-    }
-    urcList = TZListCreateList(mid);
-    if (urcList == 0) {
-        LE(TZAT_TAG, "create list failed!");
-        return;
+
+        objList = TZListCreateList(mid);
+        if (objList == 0) {
+            LE(TZAT_TAG, "create object failed!create list failed!");
+            return 0;
+        }
+
+        AsyncStart(checkFifo, ASYNC_NO_WAIT);
+        AsyncStart(checkTimeout, CHECK_TIMEOUT_INTERVAL * ASYNC_MILLISECOND);
     }
 
-    sendFunc = send;
-    isAllowSendFunc = isAllowSend;
+    if (mid == -1 || objList == 0) {
+        return 0;
+    }
 
-    AsyncStart(checkFifo, ASYNC_NO_WAIT);
-    AsyncStart(checkTimeout, CHECK_TIMEOUT_INTERVAL * ASYNC_MILLISECOND);
+    TZListNode* node = createNode(objList, sizeof(tObjItem));
+    if (node == NULL) {
+        LE(TZAT_TAG, "create object failed!create node failed!");
+        return 0;
+    }
+
+    tObjItem* obj = (tObjItem*)node->Data;
+    obj->waitResp.isWaitEnd = true;
+    obj->waitData.isWaitEnd = true;
+
+    obj->fifo = TZFifoCreate(mid, TZAT_FIFO_SIZE, 1);
+    if (obj->fifo == 0) {
+        LE(TZAT_TAG, "create object failed!create fifo failed!");
+        TZFree(obj);
+        TZFree(node);
+        return 0;
+    }
+    obj->urcList = TZListCreateList(mid);
+    if (obj->urcList == 0) {
+        LE(TZAT_TAG, "create object failed!create urc list failed!");
+        TZFifoDelete(obj->fifo);
+        TZFree(obj);
+        TZFree(node);
+        return 0;
+    }
+
+    obj->send = send;
+    obj->isAllowSend = isAllowSend;
+    obj->endSign = '\0';
+    TZListAppend(objList, node);
+    return (intptr_t)obj;
 }
 
 static int checkFifo(void) {
     static struct pt pt = {0};
-    static uint8_t byte = 0;
+    static TZListNode* node = NULL;
 
     PT_BEGIN(&pt);
 
-    while (1) {
-        if (TZFifoRead(fifo, &byte, 1) != 1) {
-            PT_EXIT(&pt);
+    node = TZListGetHeader(objList);
+    for (;;) {
+        if (node == NULL) {
+            break;
         }
 
-        if (waitResp.isWaitEnd == false) {
-            dealWaitResp(byte);
-            continue;
-        }
-        if (waitData.isWaitEnd == false) {
-            dealWaitData(byte);
-            continue;
-        }
-        dealUrcList(byte);
+        checkObjFifo((tObjItem*)node->Data);
+        node = node->Next;
     }
 
     PT_END(&pt);
 }
 
-static void dealWaitResp(uint8_t byte) {
+static void checkObjFifo(tObjItem* obj) {
+    uint8_t byte = 0;
+    for (;;) {
+        if (TZFifoRead(obj->fifo, &byte, 1) != 1) {
+            return;
+        }
+
+        if (obj->waitResp.isWaitEnd == false) {
+            dealWaitResp(obj, byte);
+            continue;
+        }
+        if (obj->waitData.isWaitEnd == false) {
+            dealWaitData(obj, byte);
+            continue;
+        }
+        dealUrcList(obj, byte);
+    }
+}
+
+static void dealWaitResp(tObjItem* obj, uint8_t byte) {
     // 接收标志.0:普通.1:换行.2:OK.3:ERROR.4:用户结束符
     int flag = 0;
-    if (byte == '\n' && waitResp.bufLen >= 1 && waitResp.buf[waitResp.bufLen - 1] == '\r') {
+    if (byte == '\n' && obj->waitResp.bufLen >= 1 && obj->waitResp.buf[obj->waitResp.bufLen - 1] == '\r') {
         flag = 1;
-    } else if (byte == 'K' && waitResp.bufLen >= 1 && waitResp.buf[waitResp.bufLen - 1] == 'O') {
+    } else if (byte == 'K' && obj->waitResp.bufLen >= 1 && obj->waitResp.buf[obj->waitResp.bufLen - 1] == 'O') {
         flag = 2;
-    } else if (byte == 'R' && waitResp.bufLen >= 4 && memcmp(waitResp.buf + waitResp.bufLen - 4, "ERRO", 4) == 0) {
+    } else if (byte == 'R' && obj->waitResp.bufLen >= 4 && memcmp(obj->waitResp.buf + obj->waitResp.bufLen - 4, "ERRO", 
+        4) == 0) {
         flag = 3;
-    } else if (endSign != '\0' && byte == endSign) {
+    } else if (obj->endSign != '\0' && byte == obj->endSign) {
         flag = 4;
     }
 
-    if (waitResp.setLineNum == 0) {
+    if (obj->waitResp.setLineNum == 0) {
         // 判断OK和ERROR
         if (flag == 2 || flag == 3 || flag == 4) {
-            waitResp.recvLineCounts++;
-            waitResp.buf[waitResp.bufLen++] = '\0';
+            obj->waitResp.recvLineCounts++;
+            obj->waitResp.buf[obj->waitResp.bufLen++] = '\0';
             
-            waitResp.result = TZAT_RESP_RESULT_OK;
-            waitResp.isWaitEnd = true;
+            obj->waitResp.result = TZAT_RESP_RESULT_OK;
+            obj->waitResp.isWaitEnd = true;
             return;
         }
     } else {
         // 判断行数是否够
         if (flag == 1) {
-            waitResp.recvLineCounts++;
-            waitResp.buf[waitResp.bufLen++] = '\0';
+            obj->waitResp.recvLineCounts++;
+            obj->waitResp.buf[obj->waitResp.bufLen++] = '\0';
 
-            if (waitResp.recvLineCounts >= waitResp.setLineNum) {
-                waitResp.result = TZAT_RESP_RESULT_OK;
-                waitResp.isWaitEnd = true;
-            } else if (waitResp.bufLen >= waitResp.bufSize) {
-                waitResp.result = TZAT_RESP_RESULT_LACK_OF_MEMORY;
-                waitResp.isWaitEnd = true;
+            if (obj->waitResp.recvLineCounts >= obj->waitResp.setLineNum) {
+                obj->waitResp.result = TZAT_RESP_RESULT_OK;
+                obj->waitResp.isWaitEnd = true;
+            } else if (obj->waitResp.bufLen >= obj->waitResp.bufSize) {
+                obj->waitResp.result = TZAT_RESP_RESULT_LACK_OF_MEMORY;
+                obj->waitResp.isWaitEnd = true;
             }
             return;
         }
     }
 
     // 普通数据
-    waitResp.buf[waitResp.bufLen++] = (char)byte;
+    obj->waitResp.buf[obj->waitResp.bufLen++] = (char)byte;
     // 考虑到结束符所以得多留一个字节空间
-    if (waitResp.bufLen >= waitResp.bufSize - 1) {
-        waitResp.result = TZAT_RESP_RESULT_LACK_OF_MEMORY;
-        waitResp.isWaitEnd = true;
+    if (obj->waitResp.bufLen >= obj->waitResp.bufSize - 1) {
+        obj->waitResp.result = TZAT_RESP_RESULT_LACK_OF_MEMORY;
+        obj->waitResp.isWaitEnd = true;
     }
 }
 
-static void dealUrcList(uint8_t byte) {
-    TZListNode* node = TZListGetHeader(urcList);
+static void dealUrcList(tObjItem* obj, uint8_t byte) {
+    TZListNode* node = TZListGetHeader(obj->urcList);
     for (;;) {
         if (node == NULL) {
             break;
@@ -261,49 +324,79 @@ static void dealUrcItem(uint8_t byte, tUrcItem* item) {
     }
 }
 
-static void dealWaitData(uint8_t byte) {
+static void dealWaitData(tObjItem* obj, uint8_t byte) {
     // 普通数据
-    waitData.buf[waitData.bufLen++] = byte;
-    if (waitData.bufLen >= waitData.bufSize) {
-        waitData.result = TZAT_RESP_RESULT_OK;
-        waitData.isWaitEnd = true;
+    obj->waitData.buf[obj->waitData.bufLen++] = byte;
+    if (obj->waitData.bufLen >= obj->waitData.bufSize) {
+        obj->waitData.result = TZAT_RESP_RESULT_OK;
+        obj->waitData.isWaitEnd = true;
 
-        waitData.callback(waitData.result, waitData.buf, waitData.bufLen);
-        TZFree(waitData.buf);
-        waitData.buf = NULL;
+        obj->waitData.callback(obj->waitData.result, obj->waitData.buf, obj->waitData.bufLen);
+        TZFree(obj->waitData.buf);
+        obj->waitData.buf = NULL;
     }
 }
 
 static int checkTimeout(void) {
     static struct pt pt = {0};
+    static TZListNode* node = NULL;
     static uint64_t now = 0;
 
     PT_BEGIN(&pt);
 
     now = TZTimeGet();
-    if (waitResp.isWaitEnd == false) {
-        if (now - waitResp.timeBegin > waitResp.timeout) {
-            waitResp.result = TZAT_RESP_RESULT_TIMEOUT;
-            waitResp.isWaitEnd = true;
+    node = TZListGetHeader(objList);
+    for (;;) {
+        if (node == NULL) {
+            break;
         }
-    }
-    if (waitData.isWaitEnd == false) {
-        if (now - waitData.timeBegin > waitData.timeout) {
-            waitData.result = TZAT_RESP_RESULT_TIMEOUT;
-            waitData.isWaitEnd = true;
 
-            waitData.callback(waitData.result, NULL, 0);
-            TZFree(waitData.buf);
-            waitData.buf = NULL;
-        }
+        checkObjTimeout((tObjItem*)node->Data, now);
+        node = node->Next;
     }
 
     PT_END(&pt);
 }
 
+static void checkObjTimeout(tObjItem* obj, uint64_t now) {
+    if (obj->waitResp.isWaitEnd == false) {
+        if (now - obj->waitResp.timeBegin > obj->waitResp.timeout) {
+            obj->waitResp.result = TZAT_RESP_RESULT_TIMEOUT;
+            obj->waitResp.isWaitEnd = true;
+        }
+    }
+    if (obj->waitData.isWaitEnd == false) {
+        if (now - obj->waitData.timeBegin > obj->waitData.timeout) {
+            obj->waitData.result = TZAT_RESP_RESULT_TIMEOUT;
+            obj->waitData.isWaitEnd = true;
+
+            obj->waitData.callback(obj->waitData.result, NULL, 0);
+            TZFree(obj->waitData.buf);
+            obj->waitData.buf = NULL;
+        }
+    }
+}
+
+static TZListNode* createNode(intptr_t list, int itemSize) {
+    TZListNode* node = TZListCreateNode(list);
+    if (node == NULL) {
+        return NULL;
+    }
+    node->Data = TZMalloc(mid, itemSize);
+    if (node->Data == NULL) {
+        TZFree(node);
+        return NULL;
+    }
+    return node;
+}
+
 // TZATReceive 接收数据.用户模块接收到数据后需调用本函数
-void TZATReceive(uint8_t* data, int size) {
-    TZFifoWriteBatch(fifo, data, size);
+void TZATReceive(intptr_t handle, uint8_t* data, int size) {
+    if (handle == 0) {
+        return;
+    }
+    tObjItem* obj = (tObjItem*)handle;
+    TZFifoWriteBatch(obj->fifo, data, size);
 }
 
 // TZATCreateResp 创建响应结构体
@@ -346,20 +439,30 @@ void TZATDeleteResp(intptr_t respHandle) {
 }
 
 // TZATIsBusy 是否忙碌.忙碌时不应该发送命令或者接收指定长度数据
-bool TZATIsBusy(void) {
-    return (waitResp.isWaitEnd == false || waitData.isWaitEnd == false);
+bool TZATIsBusy(intptr_t handle) {
+    if (handle == 0) {
+        return true;
+    }
+    tObjItem* obj = (tObjItem*)handle;
+    return (obj->waitResp.isWaitEnd == false || obj->waitData.isWaitEnd == false);
 }
 
 // TZATExecCmd 发送命令并接收响应.如果不需要响应,则respHandle可以设置为0
 // 注意本函数需通过PT_WAIT_THREAD调用
-int TZATExecCmd(intptr_t respHandle, char* cmd, ...) {
+int TZATExecCmd(intptr_t handle, intptr_t respHandle, char* cmd, ...) {
     static struct pt pt = {0};
     char buf[TZAT_CMD_LEN_MAX] = {0};
     va_list args;
+    static tObjItem* obj = NULL;
    
     PT_BEGIN(&pt);
 
-    if (TZATIsBusy()) {
+    if (handle == 0) {
+        PT_EXIT(&pt);
+    }
+    obj = (tObjItem*)handle;
+
+    if (TZATIsBusy(handle)) {
         if (respHandle != 0) {
             tResp* resp = (tResp*)respHandle;
             resp->result = TZAT_RESP_RESULT_BUSY;
@@ -376,15 +479,15 @@ int TZATExecCmd(intptr_t respHandle, char* cmd, ...) {
         PT_EXIT(&pt);
     }
 
-    sendFunc((uint8_t*)buf, (int)strlen(buf));
+    obj->send((uint8_t*)buf, (int)strlen(buf));
 
     if (respHandle != 0) {
-        waitResp = *(tResp*)respHandle;
-        memset(waitResp.buf, 0, (size_t)waitResp.bufSize);
-        waitResp.timeBegin = TZTimeGet();
-        waitResp.isWaitEnd = false;
-        PT_WAIT_UNTIL(&pt, waitResp.isWaitEnd);
-        *(tResp*)respHandle = waitResp;
+        obj->waitResp = *(tResp*)respHandle;
+        memset(obj->waitResp.buf, 0, (size_t)obj->waitResp.bufSize);
+        obj->waitResp.timeBegin = TZTimeGet();
+        obj->waitResp.isWaitEnd = false;
+        PT_WAIT_UNTIL(&pt, obj->waitResp.isWaitEnd);
+        *(tResp*)respHandle = obj->waitResp;
     }
 
     PT_END(&pt);
@@ -468,7 +571,12 @@ const char* TZATRespGetLineByKeyword(intptr_t respHandle, const char* keyword) {
 // prefix是前缀,suffix是后缀
 // bufSize是正文数据最大字节数,正文不包括前缀和后缀
 // callback是回调函数
-bool TZATRegisterUrc(char* prefix, char* suffix, int bufSize, TZDataFunc callback) {
+bool TZATRegisterUrc(intptr_t handle, char* prefix, char* suffix, int bufSize, TZDataFunc callback) {
+    if (handle == 0) {
+        return false;
+    }
+    tObjItem* obj = (tObjItem*)handle;
+
     if (bufSize == 0) {
         LE(TZAT_TAG, "register urc failed:buf size is 0");
         return false;
@@ -485,7 +593,7 @@ bool TZATRegisterUrc(char* prefix, char* suffix, int bufSize, TZDataFunc callbac
         return false;
     }
 
-    TZListNode* node = createNode();
+    TZListNode* node = createNode(obj->urcList, sizeof(tUrcItem));
     if (node == NULL) {
         LE(TZAT_TAG, "register urc failed:create node failed!");
         return false;
@@ -523,27 +631,19 @@ bool TZATRegisterUrc(char* prefix, char* suffix, int bufSize, TZDataFunc callbac
 
     item->callback = callback;
     item->isWaitPrefix = true;
-    TZListAppend(urcList, node);
+    TZListAppend(obj->urcList, node);
     return true;
 }
 
-static TZListNode* createNode(void) {
-    TZListNode* node = TZListCreateNode(urcList);
-    if (node == NULL) {
-        return NULL;
-    }
-    node->Data = TZMalloc(mid, sizeof(tUrcItem));
-    if (node->Data == NULL) {
-        TZFree(node);
-        return NULL;
-    }
-    return node;
-} 
-
 // TZATSetWaitDataCallback 设置接收指定长度数据的回调函数
 // size是接收数据字节数.timeout是超时时间,单位:ms
-bool TZATSetWaitDataCallback(int size, int timeout, TZTADataFunc callback) {
-    if (TZATIsBusy()) {
+bool TZATSetWaitDataCallback(intptr_t handle, int size, int timeout, TZTADataFunc callback) {
+    if (handle == 0) {
+        return false;
+    }
+    tObjItem* obj = (tObjItem*)handle;
+
+    if (TZATIsBusy(handle)) {
         return false;
     }
 
@@ -552,30 +652,38 @@ bool TZATSetWaitDataCallback(int size, int timeout, TZTADataFunc callback) {
         return false;
     }
 
-    if (waitData.buf != NULL) {
-        TZFree(waitData.buf);
-        waitData.buf = NULL;
+    if (obj->waitData.buf != NULL) {
+        TZFree(obj->waitData.buf);
+        obj->waitData.buf = NULL;
     }
-    waitData.buf = TZMalloc(mid, size);
-    if (waitData.buf == NULL) {
+    obj->waitData.buf = TZMalloc(mid, size);
+    if (obj->waitData.buf == NULL) {
         LE(TZAT_TAG, "set wait data callback failed!malloc buf failed,size:%d", size);
         return false;
     }
-    waitData.bufSize = size;
-    waitData.bufLen = 0;
-    waitData.isWaitEnd = false;
-    waitData.timeBegin = TZTimeGet();
-    waitData.timeout = (uint64_t)timeout * 1000;
-    waitData.callback = callback;
+    obj->waitData.bufSize = size;
+    obj->waitData.bufLen = 0;
+    obj->waitData.isWaitEnd = false;
+    obj->waitData.timeBegin = TZTimeGet();
+    obj->waitData.timeout = (uint64_t)timeout * 1000;
+    obj->waitData.callback = callback;
     return true;
 }
 
 // TZATSetEndSign 设置结束符.如果不需要额外设置则可设置为'\0'
-void TZATSetEndSign(char ch) {
-    endSign = ch;
+void TZATSetEndSign(intptr_t handle, char ch) {
+    if (handle == 0) {
+        return;
+    }
+    tObjItem* obj = (tObjItem*)handle;
+    obj->endSign = ch;
 }
 
 // TZATSendData 发送数据
-void TZATSendData(uint8_t* data, int size) {
-    sendFunc(data, size);
+void TZATSendData(intptr_t handle, uint8_t* data, int size) {
+    if (handle == 0) {
+        return;
+    }
+    tObjItem* obj = (tObjItem*)handle;
+    obj->send(data, size);
 }

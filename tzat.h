@@ -33,11 +33,18 @@ typedef enum {
 // TZTADataFunc 接收指定长度数据回调函数
 typedef void (*TZTADataFunc)(TZATRespResult result, uint8_t* bytes, int size);
 
-// TZATLoad 模块载入
-void TZATLoad(TZDataFunc send, TZIsAllowSendFunc isAllowSend);
+// TZATSetMid 设置内存id
+// 如果不调用本函数.则模块使用默认内存ID
+// 必须在调用TZATCreate函数前调用本函数,否则模块使用默认内存ID
+void TZATSetMid(int id);
+
+// TZATCreate 创建AT组件
+// send是本组件发送函数.isAllowSend是是否允许发送函数
+// 创建成功返回句柄.失败返回0
+intptr_t TZATCreate(TZDataFunc send, TZIsAllowSendFunc isAllowSend);
 
 // TZATReceive 接收数据.用户模块接收到数据后需调用本函数
-void TZATReceive(uint8_t* data, int size);
+void TZATReceive(intptr_t handle, uint8_t* data, int size);
 
 // TZATCreateResp 创建响应结构体
 // bufSize是响应数据最大字节数
@@ -50,11 +57,11 @@ intptr_t TZATCreateResp(int bufSize, int setLineNum, int timeout);
 void TZATDeleteResp(intptr_t respHandle);
 
 // TZATIsBusy 是否忙碌.忙碌时不应该发送命令或者接收指定长度数据
-bool TZATIsBusy(void);
+bool TZATIsBusy(intptr_t handle);
 
 // TZATExecCmd 发送命令并接收响应.如果不需要响应,则respHandle可以设置为0
 // 注意本函数需通过PT_WAIT_THREAD调用
-int TZATExecCmd(intptr_t respHandle, char* cmd, ...);
+int TZATExecCmd(intptr_t handle, intptr_t respHandle, char* cmd, ...);
 
 // TZATRespGetResult 读取响应结果
 TZATRespResult TZATRespGetResult(intptr_t respHandle);
@@ -64,27 +71,27 @@ int TZATRespGetLineTotal(intptr_t respHandle);
 
 // TZATRespGetLine 读取指定行
 // lineNumber是行号.行号从0开始
-// 如果指定行不存在,则返回的是NULL
+// 如果指定行不存在,则返回的是NULL.注意可能有空行
 const char* TZATRespGetLine(intptr_t respHandle, int lineNumber);
 
 // TZATRespGetLineByKeyword 读取关键字所在行
-// 如果行不存在,则返回的是NULL
+// 如果行不存在,则返回的是NULL.注意可能有空行
 const char* TZATRespGetLineByKeyword(intptr_t respHandle, const char* keyword);
 
 // TZATRegisterUrc 注册URC回调函数
 // prefix是前缀,suffix是后缀
 // bufSize是正文数据最大字节数,正文不包括前缀和后缀
 // callback是回调函数
-bool TZATRegisterUrc(char* prefix, char* suffix, int bufSize, TZDataFunc callback);
+bool TZATRegisterUrc(intptr_t handle, char* prefix, char* suffix, int bufSize, TZDataFunc callback);
 
 // TZATSetWaitDataCallback 设置接收指定长度数据的回调函数
 // size是接收数据字节数.timeout是超时时间,单位:ms
-bool TZATSetWaitDataCallback(int size, int timeout, TZTADataFunc callback);
+bool TZATSetWaitDataCallback(intptr_t handle, int size, int timeout, TZTADataFunc callback);
 
 // TZATSetEndSign 设置结束符.如果不需要额外设置则可设置为'\0'
-void TZATSetEndSign(char ch);
+void TZATSetEndSign(intptr_t handle, char ch);
 
 // TZATSendData 发送数据
-void TZATSendData(uint8_t* data, int size);
+void TZATSendData(intptr_t handle, uint8_t* data, int size);
 
 #endif
