@@ -60,7 +60,7 @@ void TZATDeleteResp(intptr_t respHandle);
 bool TZATIsBusy(intptr_t handle);
 
 // TZATExecCmd 发送命令并接收响应.如果不需要响应,则respHandle可以设置为0
-// 注意本函数需通过PT_WAIT_THREAD调用
+// 注意本函数需通过PT_WAIT_THREAD调用.调用本函数前必须调用TZATIsBusy判断忙碌
 int TZATExecCmd(intptr_t handle, intptr_t respHandle, char* cmd, ...);
 
 // TZATRespGetResult 读取响应结果
@@ -89,6 +89,7 @@ bool TZATRegisterUrc(intptr_t handle, char* prefix, char* suffix, int bufSize, T
 bool TZATSetWaitDataCallback(intptr_t handle, int size, int timeout, TZTADataFunc callback);
 
 // TZATSetEndSign 设置结束符.如果不需要额外设置则可设置为'\0'
+// 设置了结束符,则不会以默认的OK或者ERROR来判断结尾
 void TZATSetEndSign(intptr_t handle, char ch);
 
 // TZATSendData 发送数据

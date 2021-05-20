@@ -98,9 +98,12 @@ typedef struct {
 
     // 用户设置的结束符
     char endSign;
+    
+    // 执行命令的pt
+    struct pt pt;
 } tObjItem;
 
-#pragma pack(0)
+#pragma pack()
 
 static int mid = -1;
 static intptr_t objList = 0;
@@ -162,6 +165,7 @@ intptr_t TZATCreate(TZDataFunc send, TZIsAllowSendFunc isAllowSend) {
     }
 
     tObjItem* obj = (tObjItem*)node->Data;
+    obj->pt.lc = 0;
     obj->waitResp.isWaitEnd = true;
     obj->waitData.isWaitEnd = true;
 
@@ -231,10 +235,11 @@ static void dealWaitResp(tObjItem* obj, uint8_t byte) {
     int flag = 0;
     if (byte == '\n' && obj->waitResp.bufLen >= 1 && obj->waitResp.buf[obj->waitResp.bufLen - 1] == '\r') {
         flag = 1;
-    } else if (byte == 'K' && obj->waitResp.bufLen >= 1 && obj->waitResp.buf[obj->waitResp.bufLen - 1] == 'O') {
+    } else if (obj->endSign == '\0' && byte == 'K' && obj->waitResp.bufLen >= 1 && 
+        obj->waitResp.buf[obj->waitResp.bufLen - 1] == 'O') {
         flag = 2;
-    } else if (byte == 'R' && obj->waitResp.bufLen >= 4 && memcmp(obj->waitResp.buf + obj->waitResp.bufLen - 4, "ERRO", 
-        4) == 0) {
+    } else if (obj->endSign == '\0' && byte == 'R' && obj->waitResp.bufLen >= 4 && 
+        memcmp(obj->waitResp.buf + obj->waitResp.bufLen - 4, "ERRO", 4) == 0) {
         flag = 3;
     } else if (obj->endSign != '\0' && byte == obj->endSign) {
         flag = 4;
@@ -244,17 +249,22 @@ static void dealWaitResp(tObjItem* obj, uint8_t byte) {
         // 判断OK和ERROR
         if (flag == 2 || flag == 3 || flag == 4) {
             obj->waitResp.recvLineCounts++;
+            obj->waitResp.buf[obj->waitResp.bufLen++] = (char)byte;
             obj->waitResp.buf[obj->waitResp.bufLen++] = '\0';
             
             obj->waitResp.result = TZAT_RESP_RESULT_OK;
             obj->waitResp.isWaitEnd = true;
+            return;
+        } else if (flag == 1) {
+            obj->waitResp.recvLineCounts++;
+            obj->waitResp.buf[obj->waitResp.bufLen - 1] = '\0';
             return;
         }
     } else {
         // 判断行数是否够
         if (flag == 1) {
             obj->waitResp.recvLineCounts++;
-            obj->waitResp.buf[obj->waitResp.bufLen++] = '\0';
+            obj->waitResp.buf[obj->waitResp.bufLen - 1] = '\0';
 
             if (obj->waitResp.recvLineCounts >= obj->waitResp.setLineNum) {
                 obj->waitResp.result = TZAT_RESP_RESULT_OK;
@@ -296,6 +306,7 @@ static void dealUrcItem(uint8_t byte, tUrcItem* item) {
             if (item->comparePrefixNum >= item->prefixLen) {
                 item->isWaitPrefix = false;
                 item->comparePrefixNum = 0;
+                item->compareSuffixNum = 0;
                 item->buffer->len = 0;
             }
         } else {
@@ -444,53 +455,55 @@ bool TZATIsBusy(intptr_t handle) {
         return true;
     }
     tObjItem* obj = (tObjItem*)handle;
-    return (obj->waitResp.isWaitEnd == false || obj->waitData.isWaitEnd == false);
+    return (obj->waitResp.isWaitEnd == false || obj->waitData.isWaitEnd == false || obj->pt.lc != 0);
 }
 
 // TZATExecCmd 发送命令并接收响应.如果不需要响应,则respHandle可以设置为0
-// 注意本函数需通过PT_WAIT_THREAD调用
+// 注意本函数需通过PT_WAIT_THREAD调用.调用本函数前必须调用TZATIsBusy判断忙碌
 int TZATExecCmd(intptr_t handle, intptr_t respHandle, char* cmd, ...) {
-    static struct pt pt = {0};
     char buf[TZAT_CMD_LEN_MAX] = {0};
     va_list args;
-    static tObjItem* obj = NULL;
-   
-    PT_BEGIN(&pt);
+    int len = 0;
 
     if (handle == 0) {
-        PT_EXIT(&pt);
+        return PT_EXITED;
     }
-    obj = (tObjItem*)handle;
+    
+    PT_BEGIN(&((tObjItem*)handle)->pt);
 
     if (TZATIsBusy(handle)) {
         if (respHandle != 0) {
             tResp* resp = (tResp*)respHandle;
             resp->result = TZAT_RESP_RESULT_BUSY;
         }
-        PT_EXIT(&pt);
+        PT_EXIT(&((tObjItem*)handle)->pt);
     }
 
 	va_start(args, cmd);
-    int len = vsnprintf(buf, TZAT_CMD_LEN_MAX - 1, cmd, args);
+    len = vsnprintf(buf, TZAT_CMD_LEN_MAX - 1, cmd, args);
     va_end(args);
 
     if (len > TZAT_CMD_LEN_MAX || len < 0) {
         LE(TZAT_TAG, "cmd len is too long!cmd:%s", cmd);
-        PT_EXIT(&pt);
+        PT_EXIT(&((tObjItem*)handle)->pt);
+    }
+    
+    if (respHandle != 0) {
+        ((tObjItem*)handle)->waitResp = *(tResp*)respHandle;
+        memset(((tObjItem*)handle)->waitResp.buf, 0, (size_t)((tObjItem*)handle)->waitResp.bufSize);
+        ((tObjItem*)handle)->waitResp.bufLen = 0;
+        ((tObjItem*)handle)->waitResp.timeBegin = TZTimeGet();
+        ((tObjItem*)handle)->waitResp.isWaitEnd = false;
     }
 
-    obj->send((uint8_t*)buf, (int)strlen(buf));
+    ((tObjItem*)handle)->send((uint8_t*)buf, (int)strlen(buf));
 
     if (respHandle != 0) {
-        obj->waitResp = *(tResp*)respHandle;
-        memset(obj->waitResp.buf, 0, (size_t)obj->waitResp.bufSize);
-        obj->waitResp.timeBegin = TZTimeGet();
-        obj->waitResp.isWaitEnd = false;
-        PT_WAIT_UNTIL(&pt, obj->waitResp.isWaitEnd);
-        *(tResp*)respHandle = obj->waitResp;
+        PT_WAIT_UNTIL(&((tObjItem*)handle)->pt, ((tObjItem*)handle)->waitResp.isWaitEnd);
+        *(tResp*)respHandle = ((tObjItem*)handle)->waitResp;
     }
 
-    PT_END(&pt);
+    PT_END(&((tObjItem*)handle)->pt);
 }
 
 // TZATRespGetResult 读取响应结果
@@ -556,6 +569,7 @@ const char* TZATRespGetLineByKeyword(intptr_t respHandle, const char* keyword) {
     for (int i = 0; i < resp->recvLineCounts; i++) {
         len = (int)strlen(resp->buf + offset);
         if (len == 0) {
+            offset += 1;
             continue;
         }
         if (strstr(resp->buf + offset, keyword) != NULL) {
@@ -671,6 +685,7 @@ bool TZATSetWaitDataCallback(intptr_t handle, int size, int timeout, TZTADataFun
 }
 
 // TZATSetEndSign 设置结束符.如果不需要额外设置则可设置为'\0'
+// 设置了结束符,则不会以默认的OK或者ERROR来判断结尾
 void TZATSetEndSign(intptr_t handle, char ch) {
     if (handle == 0) {
         return;
